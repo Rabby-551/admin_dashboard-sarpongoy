@@ -69,3 +69,21 @@ textarea:-webkit-autofill {
 .muted-text {
   color: #6c6c6c;
 }
+
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #8fbf86 transparent;
+}
+
+.thin-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #8fbf86;
+  border-radius: 999px;
+}

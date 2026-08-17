@@ -221,6 +221,29 @@ export interface TeacherDetailsData {
   courses: TeacherCourse[];
 }
 
+export interface TeacherOverviewData {
+  courses: TeacherCourse[];
+  totalStudents: number;
+  monthlyTrend: Array<{
+    month: string;
+    completed: number;
+    avgQuizScore: number;
+  }>;
+  performanceRange: Array<{
+    courseId: string;
+    subject: string;
+    completionRate: number;
+  }>;
+  recentWork: Array<{
+    subject: string;
+    practiceCompleted: number;
+    practiceTotal: number;
+    quizCompleted: number;
+    quizTotal: number;
+    lowestQuizScore: number | null;
+  }>;
+}
+
 interface AuthBridge {
   getAccessToken: () => string | undefined;
   getRefreshToken: () => string | undefined;
@@ -538,6 +561,16 @@ export const fetchTeachers = async (params: {
 export const fetchTeacherById = async (teacherId: string) => {
   const response = await apiClient.get<ApiEnvelope<TeacherDetailsData>>(
     `/admin/teachers/${teacherId}`,
+  );
+  return unwrap(response);
+};
+
+export const fetchTeacherOverview = async (teacherId: string, subject?: string) => {
+  const response = await apiClient.get<ApiEnvelope<TeacherOverviewData>>(
+    `/admin/teachers/${teacherId}/overview`,
+    {
+      params: compactParams({ subject }),
+    },
   );
   return unwrap(response);
 };

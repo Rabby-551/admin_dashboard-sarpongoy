@@ -22,10 +22,17 @@ import {
   Landmark,
   Languages,
   Loader2,
+  Pencil,
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { fetchTeacherById, getApiErrorMessage, updateTeacher } from "@/lib/api";
+import {
+  fetchCourses,
+  fetchTeacherById,
+  fetchTeacherOverview,
+  getApiErrorMessage,
+  updateTeacher,
+} from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -48,21 +55,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-const MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
-
 type SubjectStyle = {
   label: string;
   bg: string;
@@ -73,7 +65,6 @@ type SubjectStyle = {
 
 type SubjectTile = SubjectStyle & {
   subject: string;
-  completionRate: number;
 };
 
 const SUBJECT_STYLES: SubjectStyle[] = [
@@ -114,9 +105,6 @@ const SUBJECT_STYLES: SubjectStyle[] = [
   },
 ];
 
-const clamp = (value: number, min: number, max: number) =>
-  Math.max(min, Math.min(max, value));
-
 const normalizeText = (value: string) =>
   value.trim().toLowerCase().replace(/\s+/g, " ");
 
@@ -150,32 +138,16 @@ const getInitials = (value: string) => {
   return `${names[0][0]}${names[1][0]}`.toUpperCase();
 };
 
-const buildSubjectTiles = (courses: Array<{ _id: string; name: string }>) => {
-  const fallbackRates = [95, 86, 70, 60, 52];
-  const tiles: SubjectTile[] = courses.map((course, index) => {
+const buildSubjectTiles = (
+  courses: Array<{ _id: string; name: string }>,
+): SubjectTile[] =>
+  courses.map((course) => {
     const style = resolveSubjectStyle(course.name || "");
     return {
       ...style,
       subject: course.name || style.label,
-      completionRate: clamp(92 - index * 9, 40, 98),
     };
   });
-
-  const seen = new Set(tiles.map((item) => normalizeText(item.subject)));
-  for (let index = 0; index < SUBJECT_STYLES.length; index += 1) {
-    const style = SUBJECT_STYLES[index];
-    const key = normalizeText(style.label);
-    if (seen.has(key)) continue;
-    tiles.push({
-      ...style,
-      subject: style.label,
-      completionRate: fallbackRates[index],
-    });
-    seen.add(key);
-  }
-
-  return tiles.slice(0, 5);
-};
 
 export default function TeacherDetailsPage() {
   const params = useParams<{ teacherId: string }>();
@@ -187,10 +159,20 @@ export default function TeacherDetailsPage() {
     confirmPassword: "",
   });
 
+  const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
+  const [courseDialogOpen, setCourseDialogOpen] = useState(false);
+  const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
+
   const teacherQuery = useQuery({
     queryKey: ["teacher", teacherId],
     queryFn: () => fetchTeacherById(teacherId),
     enabled: !!teacherId,
+  });
+
+  const coursesQuery = useQuery({
+    queryKey: ["courses", "active"],
+    queryFn: () => fetchCourses({ status: "active" }),
+    enabled: courseDialogOpen,
   });
 
   const resetPasswordMutation = useMutation({
@@ -204,20 +186,48 @@ export default function TeacherDetailsPage() {
     onError: (error) => toast.error(getApiErrorMessage(error)),
   });
 
+  const assignCoursesMutation = useMutation({
+    mutationFn: (payload: FormData) => updateTeacher(teacherId, payload),
+    onSuccess: () => {
+      toast.success("Assigned courses updated");
+      setCourseDialogOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["teacher", teacherId] });
+      void queryClient.invalidateQueries({
+        queryKey: ["teacher-overview", teacherId],
+      });
+    },
+    onError: (error) => toast.error(getApiErrorMessage(error)),
+  });
+
   const subjectTiles = useMemo(
     () => buildSubjectTiles(teacherQuery.data?.courses || []),
     [teacherQuery.data?.courses],
   );
 
-  const chartData = useMemo(() => {
-    const primaryRate = subjectTiles[0]?.completionRate || 75;
-    return MONTHS.map((month, index) => ({
-      month,
-      value: Math.round(
-        780 + primaryRate * 8 + index * 95 + Math.sin(index / 1.8) * 170,
-      ),
-    }));
-  }, [subjectTiles]);
+  const activeSubject = selectedSubject || subjectTiles[0]?.subject || "";
+
+  const overviewQuery = useQuery({
+    queryKey: ["teacher-overview", teacherId, activeSubject],
+    queryFn: () => fetchTeacherOverview(teacherId, activeSubject),
+    enabled: !!teacherId && subjectTiles.length > 0,
+  });
+
+  const chartData = useMemo(
+    () =>
+      (overviewQuery.data?.monthlyTrend || []).map((item) => ({
+        month: item.month,
+        value: item.completed,
+      })),
+    [overviewQuery.data],
+  );
+
+  const performanceByCourse = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const item of overviewQuery.data?.performanceRange || []) {
+      map.set(normalizeText(item.subject), item.completionRate);
+    }
+    return map;
+  }, [overviewQuery.data]);
 
   if (teacherQuery.isLoading) return <LoadingState />;
 
@@ -230,7 +240,9 @@ export default function TeacherDetailsPage() {
   }
 
   const teacher = teacherQuery.data;
-  const selectedSubject = subjectTiles[0];
+  const activeSubjectStyle = subjectTiles.find(
+    (item) => item.subject === activeSubject,
+  );
 
   const handleResetPassword = () => {
     if (!passwordState.password || !passwordState.confirmPassword) {
@@ -246,6 +258,25 @@ export default function TeacherDetailsPage() {
     const payload = new FormData();
     payload.append("password", passwordState.password);
     resetPasswordMutation.mutate(payload);
+  };
+
+  const handleOpenCourseDialog = () => {
+    setSelectedCourseIds(teacher.courses.map((course) => course._id));
+    setCourseDialogOpen(true);
+  };
+
+  const handleToggleCourse = (courseId: string) => {
+    setSelectedCourseIds((prev) =>
+      prev.includes(courseId)
+        ? prev.filter((id) => id !== courseId)
+        : [...prev, courseId],
+    );
+  };
+
+  const handleSaveCourses = () => {
+    const payload = new FormData();
+    payload.append("courseIds", JSON.stringify(selectedCourseIds));
+    assignCoursesMutation.mutate(payload);
   };
 
   return (
@@ -305,47 +336,36 @@ export default function TeacherDetailsPage() {
           </div>
 
           <div className="mt-6">
-            <h3 className="text-[20px] font-semibold text-[#272727]">Assign course</h3>
-            <p className="text-[13px] text-[#8f8f8f]">
-              Assigned subjects for the teacher
-            </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-[20px] font-semibold text-[#272727]">
+                  Assign course
+                </h3>
+                <p className="text-[13px] text-[#8f8f8f]">
+                  Assigned subjects for the teacher — select a tile to view its progress
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={handleOpenCourseDialog}
+                className="gap-2"
+              >
+                <Pencil className="h-4 w-4" />
+                Edit
+              </Button>
+            </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               {subjectTiles.map((subject) => {
                 const Icon = subject.icon;
+                const isSelected = subject.subject === activeSubject;
                 return (
-                  <div
-                    key={`${subject.subject}-top`}
-                    className="rounded-xl border p-4 text-center"
-                    style={{
-                      backgroundColor: subject.bg,
-                      borderColor: "#e2e7db",
-                    }}
-                  >
-                    <div className="mx-auto mb-2 flex h-11 w-11 items-center justify-center rounded-full bg-white/60">
-                      <Icon className="h-6 w-6" style={{ color: subject.text }} />
-                    </div>
-                    <p className="text-[13px] font-semibold" style={{ color: subject.text }}>
-                      {subject.subject}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="mt-5">
-            <h3 className="text-[20px] font-semibold text-[#272727]">Assign course</h3>
-            <p className="text-[13px] text-[#8f8f8f]">
-              Select subject and see the progress
-            </p>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              {subjectTiles.map((subject, index) => {
-                const Icon = subject.icon;
-                const isSelected = index === 0;
-                return (
-                  <div
-                    key={`${subject.subject}-bottom`}
-                    className="rounded-xl border p-4 text-center"
+                  <button
+                    key={subject.subject}
+                    type="button"
+                    onClick={() => setSelectedSubject(subject.subject)}
+                    className="rounded-xl border p-4 text-center transition-shadow"
                     style={{
                       backgroundColor: subject.bg,
                       borderColor: isSelected ? subject.border : "#e2e7db",
@@ -357,13 +377,74 @@ export default function TeacherDetailsPage() {
                     <p className="text-[13px] font-semibold" style={{ color: subject.text }}>
                       {subject.subject}
                     </p>
-                  </div>
+                  </button>
                 );
               })}
+              {subjectTiles.length === 0 && (
+                <p className="text-[13px] text-[#8f8f8f]">
+                  No subjects assigned yet. Click Edit to assign courses.
+                </p>
+              )}
             </div>
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={courseDialogOpen} onOpenChange={setCourseDialogOpen}>
+        <DialogContent className="max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle className="text-[24px]">Assign Courses</DialogTitle>
+            <DialogDescription>
+              Select the subjects {teacher.teacherName} will teach. Multiple
+              subjects can be selected.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="thin-scrollbar grid max-h-[260px] gap-2 overflow-y-auto pr-2">
+            {coursesQuery.isLoading && (
+              <p className="text-sm text-[#8f8f8f]">Loading courses…</p>
+            )}
+            {coursesQuery.isError && (
+              <p className="text-sm text-[#d53d3d]">
+                {getApiErrorMessage(coursesQuery.error, "Unable to load courses")}
+              </p>
+            )}
+            {(coursesQuery.data || []).map((course) => (
+              <label
+                key={course._id}
+                className="flex cursor-pointer items-center gap-3 rounded-lg border border-[#e2e7db] p-3 text-sm"
+              >
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={selectedCourseIds.includes(course._id)}
+                  onChange={() => handleToggleCourse(course._id)}
+                />
+                {course.name}
+              </label>
+            ))}
+            {coursesQuery.isSuccess && coursesQuery.data.length === 0 && (
+              <p className="text-sm text-[#8f8f8f]">No active courses available.</p>
+            )}
+          </div>
+
+          <DialogFooter className="grid grid-cols-2 gap-3 sm:grid-cols-2">
+            <Button variant="secondary" onClick={() => setCourseDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveCourses}
+              disabled={assignCoursesMutation.isPending}
+            >
+              {assignCoursesMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                "Save"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={resetOpen}
@@ -435,7 +516,12 @@ export default function TeacherDetailsPage() {
             <h2 className="text-[24px] font-semibold leading-none">
               Subject completion Overview
             </h2>
-            <select className="rounded-md bg-[linear-gradient(180deg,#00B023_0%,#077A1E_91.46%)] px-3 py-1 text-sm text-white outline-none">
+            <select
+              className="rounded-md bg-[linear-gradient(180deg,#00B023_0%,#077A1E_91.46%)] px-3 py-1 text-sm text-white outline-none"
+              value={activeSubject}
+              onChange={(event) => setSelectedSubject(event.target.value)}
+              disabled={subjectTiles.length === 0}
+            >
               {subjectTiles.map((subject) => (
                 <option key={subject.subject} value={subject.subject}>
                   {subject.subject}
@@ -455,11 +541,12 @@ export default function TeacherDetailsPage() {
                 </defs>
                 <CartesianGrid strokeDasharray="4 4" stroke="#cfe1c8" />
                 <XAxis dataKey="month" tickLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} allowDecimals={false} />
                 <Tooltip />
                 <Area
                   type="monotone"
                   dataKey="value"
+                  name="Activities completed"
                   stroke="#0b9f2f"
                   strokeWidth={3}
                   fill="url(#teacherOverview)"
@@ -470,8 +557,11 @@ export default function TeacherDetailsPage() {
 
           <p className="mt-3 text-sm text-[#6f6f6f]">
             Active Subject:{" "}
-            <span className="font-semibold" style={{ color: selectedSubject?.text }}>
-              {selectedSubject?.subject || "English"}
+            <span
+              className="font-semibold"
+              style={{ color: activeSubjectStyle?.text }}
+            >
+              {activeSubject || "—"}
             </span>
           </p>
         </CardContent>
@@ -482,23 +572,32 @@ export default function TeacherDetailsPage() {
           <CardContent className="p-5">
             <h3 className="text-[24px] font-semibold">Performance Range</h3>
             <div className="mt-4 space-y-4">
-              {subjectTiles.map((subject) => (
-                <div key={subject.subject}>
-                  <div className="mb-1 flex items-center justify-between text-[13px]">
-                    <span>{subject.subject}</span>
-                    <span className="font-semibold">{subject.completionRate}%</span>
+              {subjectTiles.map((subject) => {
+                const completionRate =
+                  performanceByCourse.get(normalizeText(subject.subject)) || 0;
+                return (
+                  <div key={subject.subject}>
+                    <div className="mb-1 flex items-center justify-between text-[13px]">
+                      <span>{subject.subject}</span>
+                      <span className="font-semibold">{completionRate}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-[#edf2e7]">
+                      <div
+                        className="h-2 rounded-full"
+                        style={{
+                          width: `${completionRate}%`,
+                          backgroundColor: subject.border,
+                        }}
+                      />
+                    </div>
                   </div>
-                  <div className="h-2 rounded-full bg-[#edf2e7]">
-                    <div
-                      className="h-2 rounded-full"
-                      style={{
-                        width: `${subject.completionRate}%`,
-                        backgroundColor: subject.border,
-                      }}
-                    />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
+              {subjectTiles.length === 0 && (
+                <p className="text-[13px] text-[#8f8f8f]">
+                  No subjects assigned yet.
+                </p>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -528,21 +627,17 @@ export default function TeacherDetailsPage() {
                 </TableHeader>
                 <TableBody>
                   {subjectTiles.map((subject) => {
-                    const practice = `${clamp(
-                      Math.round(16 + subject.completionRate * 0.14),
-                      8,
-                      30,
-                    )}/30`;
-                    const quiz = `${clamp(
-                      Math.round(20 + subject.completionRate * 0.2),
-                      8,
-                      40,
-                    )}/40`;
-                    const lowest = `${clamp(
-                      Math.round(8 + subject.completionRate * 0.12),
-                      4,
-                      20,
-                    )}/20`;
+                    const work = overviewQuery.data?.recentWork.find(
+                      (item) => normalizeText(item.subject) === normalizeText(subject.subject),
+                    );
+                    const practice = work
+                      ? `${work.practiceCompleted}/${work.practiceTotal}`
+                      : "—";
+                    const quiz = work
+                      ? `${work.quizCompleted}/${work.quizTotal}`
+                      : "—";
+                    const lowest =
+                      work?.lowestQuizScore != null ? `${work.lowestQuizScore}%` : "—";
 
                     return (
                       <TableRow key={subject.subject}>
@@ -555,6 +650,13 @@ export default function TeacherDetailsPage() {
                       </TableRow>
                     );
                   })}
+                  {subjectTiles.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} className="text-center text-[#8f8f8f]">
+                        No subjects assigned yet.
+                      </TableCell>
+                    </TableRow>
+                  )}
                 </TableBody>
               </Table>
             </div>
